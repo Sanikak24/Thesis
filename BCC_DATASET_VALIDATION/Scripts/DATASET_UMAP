@@ -1,1 +1,91 @@
 
+# 1. SETUP & LIBRARIES
+library(Seurat)
+library(data.table)
+library(dplyr)
+library(readxl)
+
+# 2. LOAD COUNTS 
+counts <- fread("GSE123813_bcc_scRNA_counts.txt.gz")
+
+# Fix the column shift (Gene names in V1)
+gene_col <- counts[[1]]
+counts_mat <- as.matrix(counts[, -1])
+rownames(counts_mat) <- gene_col
+
+# Clean up memory
+rm(counts)
+gc()
+
+# 3. LOAD T-CELL METADATA & CLINICAL RESPONSE
+meta_tcell <- fread("GSE123813_bcc_tcell_metadata.txt.gz")
+
+# B. Load Clinical Data (Supplementary Table 1)
+supp <- read_excel("41591_2019_522_MOESM2_ESM.xlsx", skip = 2)
+
+# Clean Clinical Data
+clin <- supp %>%
+  filter(!is.na(Patient)) %>%
+  transmute(
+    patient = Patient,
+    response_binary = case_when(
+      Response %in% c("Yes", "Yes (CR)") ~ "Responder",
+      Response == "No" ~ "NonResponder",
+      TRUE ~ NA_character_
+    )
+  )
+
+# C. Merge Clinical Data into T-Cell Metadata
+meta_tcell_final <- meta_tcell %>%
+  left_join(clin, by = "patient") %>%
+  as.data.frame() # Convert to DF for Seurat
+
+# Set row names for Seurat
+rownames(meta_tcell_final) <- meta_tcell_final$cell.id
+
+# 4. SUBSET COUNTS & CREATE SEURAT OBJECT
+# Align the counts to the T-cell metadata (subsetting down from 53k to 33k cells)
+common_cells <- intersect(colnames(counts_mat), rownames(meta_tcell_final))
+counts_tcell_only <- counts_mat[, common_cells]
+meta_tcell_final <- meta_tcell_final[common_cells, ]
+
+# Create Object
+obj <- CreateSeuratObject(
+  counts = counts_tcell_only,
+  meta.data = meta_tcell_final,
+  project = "Yost_BCC_Tcells"
+)
+
+
+print(obj)
+print(table(obj$response_binary, useNA="ifany"))
+print(table(obj$cluster)) 
+
+# Save
+saveRDS(obj, "Yost_BCC_Tcells_Final.rds")
+
+library(Seurat)
+
+# 1. Check if the UMAP columns are in your metadata
+# (They should be there from the previous 'merge' step)
+head(obj@meta.data[, c("UMAP1", "UMAP2")])
+
+# 2. Extract the coordinates into a matrix
+# Seurat requires a matrix with 2 columns
+author_umap <- as.matrix(obj@meta.data[, c("UMAP1", "UMAP2")])
+
+# 3. Rename columns to what Seurat expects
+colnames(author_umap) <- c("UMAP_1", "UMAP_2")
+
+# 4. Create the Dimension Reduction Object
+# This puts the author's coordinates into the "slot" where Seurat looks for UMAPs
+obj[["umap"]] <- CreateDimReducObject(
+  embeddings = author_umap,
+  key = "UMAP_",
+  assay = "RNA"
+)
+
+# Plot
+DimPlot(obj, group.by = "cluster", label = TRUE) + 
+  ggtitle("Yost BCC: Original Author UMAP")
+
