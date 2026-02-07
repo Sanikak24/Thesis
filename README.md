@@ -3,10 +3,10 @@
 This repository contains R scripts for my thesis analyses.
 
 ## Contents
-- **BCC dataset**: `bcc/scripts/`
+- **BCC dataset**: `bcc/Scripts/`
   - `00_initial_pipeline.R`
   - `01_alluvial_plot.R`
-- **NSCLC dataset**: `nsclc/scripts/`
+- **NSCLC dataset**: `Thesis/Scripts/`
   - `01_fig1.R` … `07_sfig2.R`
 
 ## Suggested run order
