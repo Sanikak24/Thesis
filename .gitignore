@@ -1,0 +1,17 @@
+# R
+.Rhistory
+.RData
+.Rproj.user
+
+# Outputs + data
+/data/
+/results/
+*.rds
+*.Rds
+*.h5ad
+*.h5Seurat
+*.loom
+
+# OS
+.DS_Store
+Thumbs.db
