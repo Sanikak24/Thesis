@@ -1,0 +1,182 @@
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(pROC)
+  library(ggplot2)
+})
+
+# -----------------------------
+# 1) Build cell-level meta
+
+meta_yost <- yost_mapped@meta.data %>%
+  mutate(
+    SampleID        = as.character(patient),
+    Yost_Cluster    = as.character(cluster),
+    Atlas_Cluster   = as.character(majority_vote_pca),   # keep "NA" as a label if present
+    Response_Status = as.character(response_binary)
+  ) %>%
+  filter(!is.na(SampleID)) %>%
+  filter(Response_Status %in% c("Responder", "NonResponder")) %>%
+  mutate(Response_Bin = ifelse(Response_Status == "Responder", 1, 0))
+
+sample_status_yost <- meta_yost %>%
+  select(SampleID, Response_Status, Response_Bin) %>%
+  distinct()
+
+# -----------------------------
+# 2) Helper: fit proportion-based glm + ROC
+#    NOTE: Explicit roc(direction, levels) => stable AUC
+# -----------------------------
+fit_prop_model <- function(meta, sample_status, cluster_col) {
+  
+  props <- meta %>%
+    count(SampleID, .data[[cluster_col]]) %>%
+    group_by(SampleID) %>%
+    mutate(prop = n / sum(n)) %>%
+    ungroup() %>%
+    pivot_wider(
+      names_from  = all_of(cluster_col),
+      values_from = prop,
+      values_fill = 0
+    )
+  
+  df <- props %>% left_join(sample_status, by = "SampleID")
+  
+  # predictors = all cluster proportion columns (exclude IDs/outcome and *also* exclude n if it exists)
+  drop_cols <- c("SampleID", "Response_Status", "Response_Bin", "n")
+  features  <- setdiff(colnames(df), drop_cols)
+  
+  # safety: if any weird column named "n" slipped through
+  features <- setdiff(features, "n")
+  
+  formula <- as.formula(
+    paste("Response_Bin ~", paste0("`", features, "`", collapse = " + "))
+  )
+  
+  model <- glm(formula, data = df, family = binomial)
+  
+  # IMPORTANT for stable AUC:
+  # - Response is numeric 0/1
+  # - Fix levels and direction so pROC doesn't flip across runs
+  roc_obj <- roc(
+    response  = df$Response_Bin,
+    predictor = as.numeric(predict(model, type = "response")),
+    levels    = c(0, 1),
+    direction = "<",
+    quiet     = TRUE
+  )
+  
+  list(df=df, features=features, formula=formula, model=model, roc=roc_obj)
+}
+
+# -----------------------------
+# 3) Model 1 — Yost only
+# -----------------------------
+m1 <- fit_prop_model(meta_yost, sample_status_yost, "Yost_Cluster")
+roc_m1 <- m1$roc
+
+# -----------------------------
+# 4) Model 2 — Atlas only (includes "NA" label)
+# -----------------------------
+m2 <- fit_prop_model(meta_yost, sample_status_yost, "Atlas_Cluster")
+roc_m2 <- m2$roc
+
+# -----------------------------
+# 5) Model 3 — Combined Yost×Atlas (includes "NA" label)
+# -----------------------------
+meta_comb <- meta_yost %>%
+  mutate(combined_cluster = paste(Yost_Cluster, Atlas_Cluster, sep = "_"))
+
+props_m3 <- meta_comb %>%
+  count(SampleID, combined_cluster) %>%
+  group_by(SampleID) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  pivot_wider(
+    names_from  = combined_cluster,
+    values_from = prop,
+    values_fill = 0
+  )
+
+df_m3 <- props_m3 %>% left_join(sample_status_yost, by = "SampleID")
+
+drop_cols <- c("SampleID", "Response_Status", "Response_Bin", "n")
+features_m3 <- setdiff(colnames(df_m3), drop_cols)
+features_m3 <- setdiff(features_m3, "n")
+
+formula_m3 <- as.formula(
+  paste("Response_Bin ~", paste0("`", features_m3, "`", collapse = " + "))
+)
+
+model3 <- glm(formula_m3, data = df_m3, family = binomial)
+
+roc_m3 <- roc(
+  response  = df_m3$Response_Bin,
+  predictor = as.numeric(predict(model3, type="response")),
+  levels    = c(0, 1),
+  direction = "<",
+  quiet     = TRUE
+)
+
+m3 <- list(df=df_m3, features=features_m3, formula=formula_m3, model=model3, roc=roc_m3)
+
+# -----------------------------
+# 6) Print predictors (these are the columns actually used)
+# -----------------------------
+cat("\n====================\nPREDICTORS\n====================\n")
+
+cat("\nModel 1 (Yost) predictors:\n")
+print(m1$features)
+
+cat("\nModel 2 (Atlas) predictors:\n")
+print(m2$features)
+
+cat("\nModel 3 (Combined) predictors:\n")
+print(m3$features)
+
+# -----------------------------
+# 7) ROC plot — ggroc aesthetics + fixed colors
+#     Model 1 (Yost)     = purple
+#     Model 2 (Atlas)    = orange
+#     Model 3 (Combined) = yellow
+# -----------------------------
+label_m1 <- paste0("Model 1 (Yost): AUC = ", round(auc(roc_m1), 3))
+label_m2 <- paste0("Model 2 (Atlas): AUC = ", round(auc(roc_m2), 3))
+label_m3 <- paste0("Model 3 (Combined): AUC = ", round(auc(roc_m3), 3))
+
+roc_list <- list(
+  "Model 1 (Yost)"     = roc_m1,
+  "Model 2 (Atlas)"    = roc_m2,
+  "Model 3 (Combined)" = roc_m3
+)
+
+cols <- c(
+  "Model 1 (Yost)"     = "#7D3C98",  # purple
+  "Model 2 (Atlas)"    = "#E67E22",  # orange
+  "Model 3 (Combined)" = "#F1C40F"   # yellow
+)
+
+p_figA <- ggroc(roc_list, legacy.axes = TRUE, size = 1.1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey40") +
+  scale_color_manual(
+    name   = "Model Performance",
+    values = cols,
+    breaks = c("Model 1 (Yost)", "Model 2 (Atlas)", "Model 3 (Combined)"),
+    labels = c(label_m1, label_m2, label_m3)
+  ) +
+  labs(
+    title = "Yost BCC — Sample-level prediction of response",
+    x = "Specificity (1 − FPR)",
+    y = "Sensitivity (TPR)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    legend.title    = element_text(face = "bold")
+  )
+
+print(p_figA)
+
+# Optional save:
+# ggsave("FIGA_ROC_Yost_Atlas_Combined.png", p_figA, width = 11, height = 7, dpi = 300)
