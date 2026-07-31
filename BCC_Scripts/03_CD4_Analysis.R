@@ -1,4 +1,27 @@
 # ============================================================
+# Project : sigNATURE Framework
+# Script  : # ============================================================
+# Project : sigNATURE Framework
+# Script  : 03_CD4_Analysis.R
+
+# Purpose : Map Yost et al. BCC CD8 T cells to the reference
+#           CD8 T-cell atlas using Seurat label transfer.
+#
+# Dataset :
+#   - Yost et al. (2019), GSE123813
+#   - MD Anderson CD8 T-cell Atlas
+#
+# Input :
+#   - BCC Seurat object
+#   - Reference CD8 atlas
+#
+# Output :
+#   - Integrated Seurat object
+#   - Predicted atlas labels
+#
+# Author : Sanika Kamath
+# ============================================================
+# ============================================================
 # FULL END-TO-END SCRIPT: Yost CD4 (Tfh + Treg) -> CD4 Atlas
 # (runs from DATA directory)
 #
@@ -27,19 +50,36 @@ suppressPackageStartupMessages({
   library(Matrix)
 })
 
+# Run from the project root:
+#   Rscript BCC_Scripts/03_CD4_Analysis.R
+target_vsize_mb <- 65536
+if (is.finite(mem.maxVSize()) && mem.maxVSize() < target_vsize_mb) {
+  invisible(mem.maxVSize(target_vsize_mb))
+}
+
 # -----------------------------
 # 0) Paths 
 # -----------------------------
-counts_file <- "GSE123813_bcc_scRNA_counts.txt.gz"
-meta_t_file <- "GSE123813_bcc_tcell_metadata.txt.gz"
-clin_file   <- "41591_2019_522_MOESM2_ESM.xlsx"
+counts_file <- file.path("data", "bcc", "GSE123813_bcc_scRNA_counts.txt.gz")
+meta_t_file <- file.path("data", "bcc", "GSE123813_bcc_tcell_metadata.txt.gz")
+clin_file   <- file.path("data", "bcc", "41591_2019_522_MOESM2_ESM.xlsx")
 
-cd4_atlas_rds <- "CD4.rds"  # <-- your CD4 reference atlas
+cd4_atlas_rds <- file.path("data", "reference", "CD4_Obj_for_mapping.rds")
+cd8_mapped_rds <- file.path(
+  "results", "bcc", "atlas_integration", "Yost_to_CD8Atlas_mapped.rds"
+)
 
 # output directories
-outdir <- "outputs_yost_to_cd4_atlas"
-resdir <- file.path(outdir, "RESULTS")
+resdir <- file.path("results", "bcc", "cd4_analysis")
 dir.create(resdir, showWarnings = FALSE, recursive = TRUE)
+
+required_files <- c(
+  counts_file, meta_t_file, clin_file, cd4_atlas_rds, cd8_mapped_rds
+)
+missing_files <- required_files[!file.exists(required_files)]
+if (length(missing_files) > 0) {
+  stop("Missing required input file(s): ", paste(missing_files, collapse = ", "))
+}
 
 # -----------------------------
 # Helper: print cells/genes at each step
@@ -328,17 +368,15 @@ p_overlay <- DimPlot(
   ggtitle("Overlay: Yost CD4 (Tfh+Treg) projected onto CD4 atlas UMAP") +
   theme_classic()
 
-#ggsave(file.path(resdir, "Overlay_YostCD4_on_CD4Atlas.pdf"),
-       #p_overlay, width = 9, height = 6)
+ggsave(file.path(resdir, "Overlay_YostCD4_on_CD4Atlas.pdf"),
+       p_overlay, width = 9, height = 6)
 
 # ============================================================
 # 10) SAVE RDS OBJECTS
 # ============================================================
-#saveRDS(obj,            file.path(resdir, "Yost_BCC_Tcells_all.rds"))
-#saveRDS(yost_cd4,       file.path(resdir, "Yost_CD4_Tfh_Treg_only.rds"))
-#saveRDS(CD4_ref,        file.path(resdir, "CD4_atlas_processed.rds"))
-#saveRDS(yost_cd4_mapped,file.path(resdir, "Yost_CD4_mapped_to_CD4Atlas.rds"))
-#saveRDS(combined,       file.path(resdir, "CD4Atlas_plus_YostCD4_overlay.rds"))
+saveRDS(yost_cd4,        file.path(resdir, "Yost_CD4_Tfh_Treg_only.rds"))
+saveRDS(CD4_ref,         file.path(resdir, "CD4_atlas_processed.rds"))
+saveRDS(yost_cd4_mapped, file.path(resdir, "Yost_CD4_mapped_to_CD4Atlas.rds"))
 
 cat("\nDONE.\nAll figures + RDS saved in:\n  ", normalizePath(resdir), "\n", sep = "")
 
@@ -360,9 +398,7 @@ suppressPackageStartupMessages({
 # yost_cd4       <- readRDS("outputs_yost_to_cd4_atlas/RESULTS/Yost_CD4_Tfh_Treg_only.rds")
 # yost_cd4_mapped<- readRDS("outputs_yost_to_cd4_atlas/RESULTS/Yost_CD4_mapped_to_CD4Atlas.rds")
 
-# output folder (match your pipeline)
-outdir <- "outputs_yost_to_cd4_atlas"
-resdir <- file.path(outdir, "RESULTS")
+# Continue using the project-level output directory defined above.
 dir.create(resdir, showWarnings = FALSE, recursive = TRUE)
 
 # -----------------------------
@@ -441,8 +477,8 @@ p_figC <- ggplot(figC_df, aes(x = Predicted_State, y = prop, fill = Yost_Cluster
     panel.grid.major.x = element_blank()
   )
 
-#ggsave(file.path(resdir, "CD4_FigC_stacked_proportions.pdf"),
-       #p_figC, width = 10, height = 6)
+ggsave(file.path(resdir, "CD4_FigC_stacked_proportions.pdf"),
+       p_figC, width = 10, height = 6)
 
 # -----------------------------
 # 4) FIG D alluvial:
@@ -475,8 +511,8 @@ p_alluvial <- ggplot(alluvial_df,
 
 final_plot <- plot_grid(p_alluvial, legend_table, rel_widths = c(2.6, 1), nrow = 1)
 
-#ggsave(file.path(resdir, "CD4_Alluvial_with_legend.pdf"),
-       #final_plot, width = 12, height = 7)
+ggsave(file.path(resdir, "CD4_Alluvial_with_legend.pdf"),
+       final_plot, width = 12, height = 7)
 
 # -----------------------------
 # 5) Save counts table + matrix view
@@ -699,8 +735,13 @@ p_cd4_figA <- ggroc(roc_list, legacy.axes = TRUE, size = 1.1) +
 
 print(p_cd4_figA)
 
-# Optional save:
-#ggsave("Regression_plot_BCC_CD4.pdf", p_cd4_figA, width = 12, height = 9, dpi = 300)
+ggsave(
+  file.path(resdir, "Regression_plot_BCC_CD4.pdf"),
+  p_cd4_figA,
+  width = 12,
+  height = 9,
+  dpi = 300
+)
 
 ## ALL PREDICTORS
 # ============================================================
@@ -724,10 +765,14 @@ suppressPackageStartupMessages({
 # -----------------------------
 # 0) Pick atlas label columns
 # -----------------------------
-if (!"majority_vote_pca" %in% colnames(yost_mapped@meta.data)) {
-  stop("CD8 object yost_mapped is missing majority_vote_pca in meta.data")
+yost_mapped <- readRDS(cd8_mapped_rds)
+if ("majority_vote_pca" %in% colnames(yost_mapped@meta.data)) {
+  cd8_atlas_col <- "majority_vote_pca"
+} else if ("predicted.Ref_cluster" %in% colnames(yost_mapped@meta.data)) {
+  cd8_atlas_col <- "predicted.Ref_cluster"
+} else {
+  stop("CD8 mapped object has no majority-vote or predicted atlas label column.")
 }
-cd8_atlas_col <- "majority_vote_pca"
 
 if ("majority_vote_pca" %in% colnames(yost_cd4_mapped@meta.data)) {
   cd4_atlas_col <- "majority_vote_pca"
@@ -922,6 +967,10 @@ p_figA_cd8_cd4 <- ggroc(roc_list, legacy.axes = TRUE, size = 1.1) +
 
 print(p_figA_cd8_cd4)
 
-# Optional save:
-#ggsave("Regression_plot_CD8plusCD4_Yost_Atlas_Combined.pdf", p_figA_cd8_cd4, width = 12, height = 9, dpi = 300)
-
+ggsave(
+  file.path(resdir, "Regression_plot_CD8plusCD4_Yost_Atlas_Combined.pdf"),
+  p_figA_cd8_cd4,
+  width = 12,
+  height = 9,
+  dpi = 300
+)

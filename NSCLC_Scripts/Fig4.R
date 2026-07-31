@@ -426,3 +426,71 @@ combined_roc_plot_cd4 <- ggroc(
 
 # Print the plot
 print(combined_roc_plot_cd4)
+
+#CROSS VALIDATION
+set.seed(123) 
+proportions <- c(0.90, 0.80, 0.70, 0.60, 0.50) 
+n_repeats <- 10 
+k_folds <- 5 
+n_features_total <- ncol(X)
+all_auc <- data.frame(
+  proportion = numeric(),
+  repeat_id = integer(),
+  fold_id = integer(),
+  n_features = integer(),
+  auc = numeric(),
+  stringsAsFactors = FALSE
+)
+#Loop over feature proportions and repetitions
+for (p in proportions) {
+  for (r in 1:n_repeats) {
+    
+    # Randomly sample feature columns
+    n_feat_sub <- floor(p * n_features_total)
+    feature_idx <- sample(seq_len(n_features_total), size = n_feat_sub)
+    df_sub <- data.frame(X[, feature_idx, drop = FALSE], response = y)
+    
+    # Create k-fold CV splits
+    n_rows <- nrow(df_sub)
+    set.seed(1000 + which(proportions == p) * 100 + r)
+    shuffled_idx <- sample(seq_len(n_rows))
+    fold_assign <- cut(seq_along(shuffled_idx), breaks = k_folds, labels = FALSE)
+    
+    for (k in 1:k_folds) {
+      val_idx <- shuffled_idx[fold_assign == k]
+      train_idx <- setdiff(seq_len(n_rows), val_idx)
+      
+      train_data <- df_sub[train_idx, ]
+      val_data <- df_sub[val_idx, ]
+      
+      # Handle undefined AUCs if validation fold has < 2 clinical classes
+      41
+      if (length(unique(val_data$response)) < 2) {
+        auc_value <- NA_real_
+      } else {
+        fit <- glm(response ~ ., data = train_data, family = binomial)
+        val_prob <- predict(fit, newdata = val_data, type = "response")
+        roc_obj <- roc(response = val_data$response, predictor = val_prob, quiet = TRUE)
+        auc_value <- as.numeric(auc(roc_obj))
+      }
+      
+      all_auc <- rbind(all_auc, data.frame(proportion = p, auc = auc_value))
+    }
+  }
+}
+write_xlsx(all_auc, path = "Sanika_feature_sampling_AUC_results.xlsx")
+library(ggplot2)
+# Make sure proportion is treated as a factor for discrete x-axis
+all_auc$proportion <- factor(all_auc$proportion,
+                             levels = sort(unique(all_auc$proportion), decreasing = FALSE))
+# Boxplot of AUC by feature proportion
+ggplot(all_auc, aes(x = proportion, y = auc)) +
+  geom_boxplot() +
+  #ylim(0.50, 0.75) +
+  labs(
+    x = "Proportion of Features Used",
+    y = "AUC (Validation)",
+    title = "Distribution of Validation AUCs by Feature Proportion"
+  ) +
+  theme_bw()
+

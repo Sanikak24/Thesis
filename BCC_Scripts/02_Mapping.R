@@ -1,3 +1,23 @@
+# ============================================================
+# Project : sigNATURE Framework
+# Script  : 02_Mapping.R
+# Purpose : Map Yost et al. BCC CD8 T cells to the reference
+#           CD8 T-cell atlas using Seurat label transfer.
+#
+# Dataset :
+#   - Yost et al. (2019), GSE123813
+#   - MD Anderson CD8 T-cell Atlas
+#
+# Input :
+#   - BCC Seurat object
+#   - Reference CD8 atlas
+#
+# Output :
+#   - Integrated Seurat object
+#   - Predicted atlas labels
+#
+# Author : Sanika Kamath
+# ============================================================
 # FIXED, FULL END-TO-END SCRIPT (runs from DATA directory)
 #
 # What this script produces (in ONE folder):
@@ -18,18 +38,30 @@ suppressPackageStartupMessages({
   library(Matrix)
 })
 
+# Run from the project root:
+#   Rscript BCC_Scripts/02_Mapping.R
+target_vsize_mb <- 65536
+if (is.finite(mem.maxVSize()) && mem.maxVSize() < target_vsize_mb) {
+  invisible(mem.maxVSize(target_vsize_mb))
+}
+
 # -----------------------------
 # 0) Paths 
 # -----------------------------
-counts_file <- "GSE123813_bcc_scRNA_counts.txt.gz"
-meta_t_file <- "GSE123813_bcc_tcell_metadata.txt.gz"
-clin_file   <- "41591_2019_522_MOESM2_ESM.xlsx"
-atlas_rds   <- "CD8.rds"  # reference atlas
+counts_file <- file.path("data", "bcc", "GSE123813_bcc_scRNA_counts.txt.gz")
+meta_t_file <- file.path("data", "bcc", "GSE123813_bcc_tcell_metadata.txt.gz")
+clin_file   <- file.path("data", "bcc", "41591_2019_522_MOESM2_ESM.xlsx")
+atlas_rds   <- file.path("data", "reference", "CD8_Obj_for_mapping.rds")
 
 # output directories 
-outdir   <- "outputs_yost_to_atlas"
-resdir   <- file.path(outdir, "RESULTS")
+resdir   <- file.path("results", "bcc", "mapping")
 dir.create(resdir, showWarnings = FALSE, recursive = TRUE)
+
+required_files <- c(counts_file, meta_t_file, clin_file, atlas_rds)
+missing_files <- required_files[!file.exists(required_files)]
+if (length(missing_files) > 0) {
+  stop("Missing required input file(s): ", paste(missing_files, collapse = ", "))
+}
 
 # -----------------------------
 # Helper: print cells/genes at each step
@@ -244,8 +276,8 @@ p_pred <- DimPlot(
   ggtitle("Yost CD8 projected into atlas UMAP (colored by predicted atlas state)") +
   theme_classic()
 
-#ggsave(file.path(resdir, "Yost_projected_predicted_clusters_refUMAP.pdf"),
-       #p_pred, width = 9, height = 6)
+ggsave(file.path(resdir, "Yost_projected_predicted_clusters_refUMAP.pdf"),
+       p_pred, width = 9, height = 6)
 
 # ============================================================
 # 8) PROJECTION CONFIDENCE PLOT (FIXED UMAP_1/UMAP_2 NAMES)
@@ -263,8 +295,8 @@ p_score <- ggplot(yost_embed, aes(x = UMAP_1, y = UMAP_2, color = score)) +
   ) +
   theme_classic()
 
-#ggsave(file.path(resdir, "Yost_projection_score_refUMAP.pdf"),
-       #p_score, width = 9, height = 6)
+ggsave(file.path(resdir, "Yost_projection_score_refUMAP.pdf"),
+       p_score, width = 9, height = 6)
 
 # ============================================================
 # 9) OVERLAY: YOST CD8 POINTS ON ATLAS UMAP (COMBINE CD8 ONLY)
@@ -313,17 +345,15 @@ p_overlay <- DimPlot(
   ggtitle("Overlay: Yost CD8 projected onto CD8 atlas UMAP") +
   theme_classic()
 
-#ggsave(file.path(resdir, "Overlay_Yost_on_Atlas.pdf"),
-       #p_overlay, width = 9, height = 6)
+ggsave(file.path(resdir, "Overlay_Yost_on_Atlas.pdf"),
+       p_overlay, width = 9, height = 6)
 
 # ============================================================
 # 10) SAVE RDS OBJECTS
 # ============================================================
-#saveRDS(obj,         file.path(resdir, "Yost_BCC_Tcells_all.rds"))
-#saveRDS(yost_cd8,    file.path(resdir, "Yost_CD8_only.rds"))
-#saveRDS(CD8_ref,     file.path(resdir, "CD8_atlas_processed.rds"))
-#saveRDS(yost_mapped, file.path(resdir, "Yost_CD8_mapped_to_atlas.rds"))
-#saveRDS(combined,    file.path(resdir, "Atlas_plus_Yost_overlay.rds"))
+saveRDS(yost_cd8,    file.path(resdir, "Yost_CD8_only.rds"))
+saveRDS(CD8_ref,     file.path(resdir, "CD8_atlas_processed.rds"))
+saveRDS(yost_mapped, file.path(resdir, "Yost_CD8_mapped_to_atlas.rds"))
 
 cat("\nDONE.\nAll figures + RDS saved in:\n  ", normalizePath(resdir), "\n", sep = "")
 
@@ -342,4 +372,3 @@ dataset_table <- tibble::tibble(
 )
 
 dataset_table
-

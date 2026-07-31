@@ -1,6 +1,51 @@
+# ============================================================
+# Project : sigNATURE Framework
+# Script  : 01_Atlas_Integration.R
+# Purpose : Map Yost et al. BCC CD8 T cells to the reference
+#           CD8 T-cell atlas using Seurat label transfer.
+#
+# Datasets:
+#   - Yost et al. (2019), GSE123813
+#   - MD Anderson CD8 T-cell Atlas
+#
+# Inputs:
+#   - data/bcc/GSE123813_bcc_scRNA_counts.txt.gz
+#       Raw single-cell RNA-seq count matrix from Yost et al.
+#
+#   - data/bcc/GSE123813_bcc_tcell_metadata.txt.gz
+#       Cell-level metadata for the Yost BCC dataset.
+#
+#   - data/bcc/41591_2019_522_MOESM2_ESM.xlsx
+#       Clinical response metadata from the Nature Medicine
+#       supplementary files.
+#
+#   - data/reference/CD8_Obj_for_mapping.rds
+#       MD Anderson CD8 T-cell reference atlas as a Seurat object.
+#
+# Outputs:
+#   - results/bcc/atlas_integration/Yost_BCC_Tcells_Final.rds
+#       Processed Seurat object for the Yost BCC T-cell dataset.
+#
+#   - results/bcc/atlas_integration/Yost_to_CD8Atlas_mapped.rds
+#       CD8 cells after label transfer from the reference atlas.
+#
+#   - results/bcc/atlas_integration/Yost_CD8_ATLAS_PROJECTION.pdf
+#       Overlay of mapped Yost CD8 cells on the MD Anderson
+#       CD8 T-cell atlas.
+#
+# Author : Sanika Kamath
+# ============================================================
 
-# Yost BCC T cells -> CD8 atlas mapping (Seurat)
-
+# The reference/query merge near the end requires more than macOS R's
+# default 16 GB vector-heap limit. Raise the ceiling before loading data so
+# this script can be run directly with:
+#   Rscript BCC_Scripts/01_Atlas_Integration.R
+target_vsize_mb <- 65536
+current_vsize_mb <- mem.maxVSize()
+if (is.finite(current_vsize_mb) && current_vsize_mb < target_vsize_mb) {
+  mem.maxVSize(target_vsize_mb)
+}
+message("R vector-memory limit: ", mem.maxVSize(), " MB")
 
 suppressPackageStartupMessages({
   library(Seurat)
@@ -12,15 +57,43 @@ suppressPackageStartupMessages({
   library(Matrix)
 })
 
-# 0) EDIT THESE PATHS
-data_dir      <- "."  # set to your DATA folder (currently getwd() is DATA)
-counts_file   <- file.path(data_dir, "GSE123813_bcc_scRNA_counts.txt.gz")
-meta_file     <- file.path(data_dir, "GSE123813_bcc_tcell_metadata.txt.gz")
-clin_xlsx     <- file.path(data_dir, "41591_2019_522_MOESM2_ESM.xlsx")
+# 0) PATHS
+bcc_data_dir <- file.path("data", "bcc")
+ref_data_dir <- file.path("data", "reference")
+out_dir      <- file.path("results", "bcc", "atlas_integration")
 
-ref_rds       <- file.path(data_dir, "CD8.rds")  
-out_rds       <- file.path(data_dir, "Yost_BCC_Tcells_Final.rds")
-out_prefix    <- file.path(data_dir, "Yost_to_CD8Atlas")
+counts_file <- Sys.getenv(
+  "BCC_COUNTS_FILE",
+  unset = file.path(bcc_data_dir, "GSE123813_bcc_scRNA_counts.txt.gz")
+)
+meta_file <- Sys.getenv(
+  "BCC_METADATA_FILE",
+  unset = file.path(bcc_data_dir, "GSE123813_bcc_tcell_metadata.txt.gz")
+)
+clin_xlsx <- Sys.getenv(
+  "BCC_CLINICAL_FILE",
+  unset = file.path(bcc_data_dir, "41591_2019_522_MOESM2_ESM.xlsx")
+)
+ref_rds <- Sys.getenv(
+  "CD8_REFERENCE_RDS",
+  unset = file.path(ref_data_dir, "CD8_Obj_for_mapping.rds")
+)
+
+out_rds    <- file.path(out_dir, "Yost_BCC_Tcells_Final.rds")
+out_mapped <- file.path(out_dir, "Yost_to_CD8Atlas_mapped.rds")
+out_pdf    <- file.path(out_dir, "Yost_CD8_ATLAS_PROJECTION.pdf")
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+if (!dir.exists(out_dir)) {
+  stop("Could not create output directory: ", out_dir)
+}
+
+input_files <- c(counts_file, meta_file, clin_xlsx, ref_rds)
+missing_files <- input_files[!file.exists(input_files)]
+if (length(missing_files) > 0) {
+  stop("Missing required input file(s): ",
+       paste(missing_files, collapse = ", "))
+}
 
 # Metadata column in the atlas that I want to transfer
 ref_label_col <- "cell.type"
@@ -28,6 +101,7 @@ ref_label_col <- "cell.type"
 # Yost clusters that define CD8 states in the paper metadata
 cd8_clusters <- c("CD8_act","CD8_eff","CD8_ex","CD8_ex_act","CD8_mem")
 
+message("Loading BCC count matrix...")
 # 1) LOAD COUNTS
 counts_dt <- fread(counts_file)
 # first column is gene names 
@@ -46,13 +120,23 @@ rownames(counts_mat) <- gsub("_", "-", rownames(counts_mat))
 counts_mat <- Matrix(counts_mat, sparse = TRUE)
 
 # 2) LOAD T-CELL METADATA + CLINICAL RESPONSE
-message("Loading metadata + clinical data...")
-stopifnot(file.exists(meta_file))
-stopifnot(file.exists(clin_xlsx))
+message("Loading BCC metadata and clinical response data...")
 
 meta_tcell <- fread(meta_file)
+required_meta_cols <- c("cell.id", "patient", "cluster")
+missing_meta_cols <- setdiff(required_meta_cols, colnames(meta_tcell))
+if (length(missing_meta_cols) > 0) {
+  stop("T-cell metadata is missing required column(s): ",
+       paste(missing_meta_cols, collapse = ", "))
+}
 
 supp <- read_excel(clin_xlsx, skip = 2)
+required_clin_cols <- c("Patient", "Response")
+missing_clin_cols <- setdiff(required_clin_cols, colnames(supp))
+if (length(missing_clin_cols) > 0) {
+  stop("Clinical spreadsheet is missing required column(s): ",
+       paste(missing_clin_cols, collapse = ", "))
+}
 
 clin <- supp %>%
   filter(!is.na(Patient)) %>%
@@ -69,7 +153,6 @@ meta_tcell_final <- meta_tcell %>%
   left_join(clin, by = "patient") %>%
   as.data.frame()
 
-stopifnot("cell.id" %in% colnames(meta_tcell_final))
 rownames(meta_tcell_final) <- meta_tcell_final$cell.id
 
 # 3) ALIGN CELLS + CREATE SEURAT OBJECT
@@ -111,11 +194,11 @@ if (all(c("UMAP1","UMAP2") %in% colnames(obj@meta.data))) {
   message("UMAP1/UMAP2 not found in metadata; skipping author UMAP import.")
 }
 
+message("Saving processed BCC T-cell object...")
 saveRDS(obj, out_rds)
 
 # 5) LOAD CD8 REFERENCE ATLAS
-message("Loading CD8 atlas...")
-stopifnot(file.exists(ref_rds))
+message("Loading CD8 reference atlas...")
 CD8_ref <- readRDS(ref_rds)
 
 if (!(ref_label_col %in% colnames(CD8_ref@meta.data))) {
@@ -130,11 +213,18 @@ rownames(CD8_ref) <- gsub("_", "-", rownames(CD8_ref))
 message("Subsetting Yost to CD8 clusters...")
 yost_cd8 <- subset(obj, subset = cluster %in% cd8_clusters)
 print(yost_cd8)
+if (ncol(yost_cd8) == 0) {
+  stop("CD8 cluster subset is empty. Check cluster annotations.")
+}
 
 # 7) HARMONIZE GENES BETWEEN REFERENCE + QUERY
 
 common_genes <- intersect(rownames(CD8_ref), rownames(yost_cd8))
 message("Common genes: ", length(common_genes))
+
+if (length(common_genes) == 0) {
+  stop("No common genes between the CD8 reference and BCC query.")
+}
 
 if (length(common_genes) < 2000) {
   warning("Very few common genes found (", length(common_genes), "). Check gene naming conventions.")
@@ -144,6 +234,7 @@ CD8_ref2  <- subset(CD8_ref, features = common_genes)
 yost_cd82 <- subset(yost_cd8, features = common_genes)
 
 # 8) NORMALIZE / PCA / UMAP MODEL ON REFERENCE (needed for MapQuery projection)
+message("Preprocessing query and reference...")
 
 # Query processing
 yost_cd82 <- NormalizeData(yost_cd82)
@@ -166,6 +257,7 @@ CD8_ref2 <- RunUMAP(
 )
 
 # 9) TRANSFER LABELS + MAP QUERY
+message("Finding transfer anchors and mapping the query...")
 
 anchors <- FindTransferAnchors(
   reference = CD8_ref2,
@@ -217,18 +309,35 @@ p4 <- DimPlot(
 print(p4)
 
 # 11) OPTIONAL: OVERLAY REFERENCE + YOST ON SAME UMAP
+message("Creating reference and mapped-query overlay...")
 
 ref_umap <- Embeddings(CD8_ref2, "umap")
 yost_umap <- Embeddings(yost_mapped, "ref.umap")  # projection coordinates
 
+required_mapped_cols <- c(
+  "predicted.Ref_cluster",
+  "predicted.Ref_cluster.score"
+)
+missing_mapped_cols <- setdiff(
+  required_mapped_cols,
+  colnames(yost_mapped@meta.data)
+)
+if (length(missing_mapped_cols) > 0) {
+  stop("Mapped query is missing required metadata column(s): ",
+       paste(missing_mapped_cols, collapse = ", "))
+}
+
+if (!identical(rownames(yost_umap), Cells(yost_mapped))) {
+  stop("Projected query embeddings do not align with mapped-query cell names.")
+}
+
 combined <- merge(
   x = CD8_ref2,
-  y = yost_cd82,
+  y = yost_mapped,
   add.cell.ids = c("Reference", "Yost"),
   merge.data = FALSE
 )
 
-# Prefix embedding rownames to match merged cell names
 ref_umap_pref <- ref_umap
 rownames(ref_umap_pref) <- paste0("Reference_", rownames(ref_umap_pref))
 
@@ -236,7 +345,16 @@ yost_umap_pref <- yost_umap
 rownames(yost_umap_pref) <- paste0("Yost_", rownames(yost_umap_pref))
 
 all_umap <- rbind(ref_umap_pref, yost_umap_pref)
+
+if (!identical(sort(rownames(all_umap)), sort(Cells(combined)))) {
+  stop("Projected embeddings do not align with merged cell names.")
+}
+
 all_umap <- all_umap[Cells(combined), , drop = FALSE]
+
+if (!identical(rownames(all_umap), Cells(combined))) {
+  stop("Projected embeddings could not be ordered to match merged cells.")
+}
 
 combined[["umap"]] <- CreateDimReducObject(
   embeddings = as.matrix(all_umap),
@@ -249,6 +367,8 @@ combined$dataset <- ifelse(startsWith(Cells(combined), "Reference_"), "Reference
 p5 <- DimPlot(combined, reduction="umap", group.by="dataset", pt.size=1) +
   ggtitle("Yost CD8 overlaid on CD8 atlas UMAP")
 print(p5)
-ggsave(filename="outputs_yost_to_atlas/Yost_CD8_ATLAS_PROJECTION.pdf", plot = p5, width=9, height=12)
-# Save mapped object
-saveRDS(yost_mapped, paste0(out_prefix, "_mapped.rds"))
+
+message("Saving atlas-integration outputs...")
+ggsave(filename = out_pdf, plot = p5, width = 9, height = 12)
+saveRDS(yost_mapped, out_mapped)
+message("Atlas integration complete. Outputs written to: ", out_dir)

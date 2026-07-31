@@ -4,9 +4,32 @@ library(Seurat)
 library(data.table)
 library(dplyr)
 library(readxl)
+library(ggplot2)
+
+# Run from the project root:
+#   Rscript BCC_Scripts/05_Original_Dataset_UMAP.R
+target_vsize_mb <- 65536
+if (is.finite(mem.maxVSize()) && mem.maxVSize() < target_vsize_mb) {
+  invisible(mem.maxVSize(target_vsize_mb))
+}
+
+data_dir <- file.path("data", "bcc")
+counts_file <- file.path(data_dir, "GSE123813_bcc_scRNA_counts.txt.gz")
+meta_file <- file.path(data_dir, "GSE123813_bcc_tcell_metadata.txt.gz")
+clin_file <- file.path(data_dir, "41591_2019_522_MOESM2_ESM.xlsx")
+out_dir <- file.path("results", "bcc", "original_umap")
+out_rds <- file.path(out_dir, "Yost_BCC_Tcells_with_author_UMAP.rds")
+out_pdf <- file.path(out_dir, "Yost_BCC_original_author_UMAP.pdf")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+required_files <- c(counts_file, meta_file, clin_file)
+missing_files <- required_files[!file.exists(required_files)]
+if (length(missing_files) > 0) {
+  stop("Missing required input file(s): ", paste(missing_files, collapse = ", "))
+}
 
 # 2. LOAD COUNTS 
-counts <- fread("GSE123813_bcc_scRNA_counts.txt.gz")
+counts <- fread(counts_file)
 
 # Fix the column shift (Gene names in V1)
 gene_col <- counts[[1]]
@@ -18,10 +41,10 @@ rm(counts)
 gc()
 
 # 3. LOAD T-CELL METADATA & CLINICAL RESPONSE
-meta_tcell <- fread("GSE123813_bcc_tcell_metadata.txt.gz")
+meta_tcell <- fread(meta_file)
 
 # B. Load Clinical Data (Supplementary Table 1)
-supp <- read_excel("41591_2019_522_MOESM2_ESM.xlsx", skip = 2)
+supp <- read_excel(clin_file, skip = 2)
 
 # Clean Clinical Data
 clin <- supp %>%
@@ -62,8 +85,6 @@ print(table(obj$response_binary, useNA="ifany"))
 print(table(obj$cluster)) 
 
 # Save
-saveRDS(obj, "Yost_BCC_Tcells_Final.rds")
-
 library(Seurat)
 
 # 1. Check if the UMAP columns are in your metadata
@@ -86,6 +107,8 @@ obj[["umap"]] <- CreateDimReducObject(
 )
 
 # Plot
-DimPlot(obj, group.by = "cluster", label = TRUE) + 
+p_author_umap <- DimPlot(obj, group.by = "cluster", label = TRUE) + 
   ggtitle("Yost BCC: Original Author UMAP")
 
+ggsave(out_pdf, p_author_umap, width = 9, height = 6)
+saveRDS(obj, out_rds)

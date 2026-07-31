@@ -6,6 +6,36 @@ suppressPackageStartupMessages({
   library(ggplot2)
 })
 
+# Run from the project root after 04_Alluvial_Plot.R:
+#   Rscript BCC_Scripts/06_Regression_Analysis_CD8.R
+mapped_rds <- file.path(
+  "results", "bcc", "alluvial", "Yost_CD8_mapped_majority_vote.rds"
+)
+out_dir <- file.path("results", "bcc", "regression_cd8")
+out_pdf <- file.path(out_dir, "FIGA_ROC_Yost_Atlas_Combined.pdf")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+if (!file.exists(mapped_rds)) {
+  stop(
+    "Missing mapped CD8 input: ", mapped_rds,
+    "\nRun: Rscript BCC_Scripts/04_Alluvial_Plot.R"
+  )
+}
+
+yost_mapped <- readRDS(mapped_rds)
+required_meta_cols <- c(
+  "patient", "cluster", "response_binary", "majority_vote_pca"
+)
+missing_meta_cols <- setdiff(
+  required_meta_cols, colnames(yost_mapped@meta.data)
+)
+if (length(missing_meta_cols) > 0) {
+  stop(
+    "Mapped CD8 object is missing required metadata column(s): ",
+    paste(missing_meta_cols, collapse = ", ")
+  )
+}
+
 # -----------------------------
 # 1) Build cell-level meta
 
@@ -178,5 +208,4 @@ p_figA <- ggroc(roc_list, legacy.axes = TRUE, size = 1.1) +
 
 print(p_figA)
 
-# Optional save:
-# ggsave("FIGA_ROC_Yost_Atlas_Combined.png", p_figA, width = 11, height = 7, dpi = 300)
+ggsave(out_pdf, p_figA, width = 11, height = 7, dpi = 300)

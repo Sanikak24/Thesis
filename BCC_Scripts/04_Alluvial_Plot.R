@@ -10,6 +10,28 @@ suppressPackageStartupMessages({
   library(cowplot)
 })
 
+# Run from the project root:
+#   Rscript BCC_Scripts/04_Alluvial_Plot.R
+target_vsize_mb <- 65536
+if (is.finite(mem.maxVSize()) && mem.maxVSize() < target_vsize_mb) {
+  invisible(mem.maxVSize(target_vsize_mb))
+}
+
+ref_rds <- file.path("data", "reference", "CD8_Obj_for_mapping.rds")
+yost_all_rds <- file.path(
+  "results", "bcc", "atlas_integration", "Yost_BCC_Tcells_Final.rds"
+)
+out_dir <- file.path("results", "bcc", "alluvial")
+out_mapped_rds <- file.path(out_dir, "Yost_CD8_mapped_majority_vote.rds")
+out_pdf <- file.path(out_dir, "Alluvial_Plot.pdf")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+required_files <- c(ref_rds, yost_all_rds)
+missing_files <- required_files[!file.exists(required_files)]
+if (length(missing_files) > 0) {
+  stop("Missing required input file(s): ", paste(missing_files, collapse = ", "))
+}
+
 # Custom helper: Add missing genes with zero expression for Seurat v5 
 AddMissingGenes <- function(seurat_obj, gene_list, assay = "RNA") {
   stopifnot(assay %in% Assays(seurat_obj))
@@ -52,8 +74,11 @@ AddMissingGenes <- function(seurat_obj, gene_list, assay = "RNA") {
 }
 
 # 0) INPUT FILES
-# CD8_ref     <- readRDS("CD8.rds")   # atlas reference
-# yost_cd8    <- readRDS("yost_cd8.rds")   # Yost CD8-only Seurat object
+CD8_ref <- readRDS(ref_rds)
+yost_all <- readRDS(yost_all_rds)
+cd8_clusters <- c("CD8_act", "CD8_eff", "CD8_ex", "CD8_ex_act", "CD8_mem")
+yost_cd8 <- subset(yost_all, subset = cluster %in% cd8_clusters)
+rm(yost_all)
 
 # 1) Preprocess reference atlas (needed for PCA + UMAP model)
 CD8_ref <- CD8_ref %>%
@@ -199,5 +224,5 @@ p_alluvial_yost <- ggplot(summary_df_yost,
 
 final_plot_yost <- plot_grid(p_alluvial_yost, legend_table, rel_widths = c(2.5, 1), nrow = 1)
 print(final_plot_yost)
-ggsave(filename = "outputs_yost_to_atlas/Alluvial_Plot.pdf",plot = p_alluvial_yost, width = 9, height = 12)
-
+ggsave(filename = out_pdf, plot = p_alluvial_yost, width = 9, height = 12)
+saveRDS(yost_mapped, out_mapped_rds)
