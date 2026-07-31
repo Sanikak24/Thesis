@@ -6,6 +6,49 @@ library(cowplot)
 library(gridExtra)
 library(grid)
 library(readr)
+library(Matrix)
+library(stringr)
+library(readxl)
+
+nsclc_data_dir <- file.path("data", "nsclc")
+reference_dir <- file.path("data", "reference")
+results_dir <- file.path("results", "nsclc")
+intermediate_dir <- file.path(results_dir, "intermediate")
+
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(intermediate_dir, recursive = TRUE, showWarnings = FALSE)
+
+require_input <- function(path) {
+  if (
+    !file.exists(path) ||
+    is.na(file.info(path)$size) ||
+    file.info(path)$size == 0
+  ) {
+    stop(
+      "Required input file is missing or empty: ",
+      path,
+      "\nRun: Rscript NSCLC_Scripts/00_Setup_Data.R"
+    )
+  }
+}
+
+cd8_reference_file <- file.path(reference_dir, "CD8_Obj_for_mapping.rds")
+cd4_reference_file <- file.path(reference_dir, "CD4_Obj_for_mapping.rds")
+counts_file <- file.path(nsclc_data_dir, "GSE179994_all.Tcell.rawCounts.rds")
+metadata_file <- file.path(nsclc_data_dir, "GSE179994_Tcell.metadata.tsv")
+response_file <- file.path(nsclc_data_dir, "response_info.xlsx")
+liu_cd8_file <- file.path(intermediate_dir, "liu_cd8_mapped.rds")
+liu_cd4_file <- file.path(intermediate_dir, "liu_cd4_mapped.rds")
+cd8_prepared_file <- file.path(intermediate_dir, "cd8_reference_prepared.rds")
+cd4_prepared_file <- file.path(intermediate_dir, "cd4_reference_prepared.rds")
+
+invisible(lapply(
+  c(
+    cd8_reference_file, cd4_reference_file, counts_file,
+    metadata_file, response_file
+  ),
+  require_input
+))
 
 #NEW
 # --- Custom helper: Add missing genes with zero expression for Seurat v5 ---
@@ -33,60 +76,26 @@ AddMissingGenes <- function(seurat_obj, gene_list, assay = "RNA") {
   
   return(seurat_obj)
 }
-CD8_Obj <- readRDS("CD8.rds")
-liu_counts <- readRDS("GSE179994_all.Tcell.rawCounts.rds/GSE179994_all.Tcell.rawCounts.rds")
-liu_meta   <- read_tsv("GSE179994_Tcell.metadata.tsv/GSE179994_Tcell.metadata.tsv")
-
-liu_meta_cd8 <- liu_meta %>% filter(celltype == "CD8")
-counts_cd8   <- liu_counts[, liu_meta_cd8$cellid]
-
-# 2. Create and Normalize Liu CD8 Seurat Object
-liu_seurat <- CreateSeuratObject(counts_cd8, meta.data = as.data.frame(liu_meta_cd8)) %>%
-  NormalizeData() %>%
-  FindVariableFeatures() %>%  # optional; keeps Seurat happy but not used
-  ScaleData()
-# 3. Preprocess Reference CD8 Seurat Object
-CD8_Obj <- CD8_Obj %>%
-  NormalizeData() %>%
-  FindVariableFeatures() %>%
-  ScaleData() %>%
-  RunPCA() %>%
-  RunUMAP(reduction = "pca", dims = 1:20, return.model = TRUE)
-
-# 4. Add missing genes (with zeros) to Liu object to match reference
-all_genes <- rownames(CD8_Obj)
-liu_seurat <- AddMissingGenes(liu_seurat, all_genes)
-
-# 5. Find Anchors with All Genes
-anchors <- FindTransferAnchors(
-  reference = CD8_Obj,
-  query = liu_seurat,
-  dims = 1:20,
-  features = all_genes,
-  reference.reduction = "pca"
-)
-
-liu_seurat <- MapQuery(
-  anchorset = anchors,
-  query = liu_seurat,
-  reference = CD8_Obj,
-  refdata = list(predicted.celltype = "cell.type"),
-  reference.reduction = "pca",
-  reduction.model = "umap"
-)
-
-# 5. Majority Vote Labeling
-ref_pca     <- Embeddings(CD8_Obj, reduction = "pca")[, 1:20]
-query_pca   <- Embeddings(liu_seurat, reduction = "ref.pca")[, 1:20]
-neighbors   <- get.knnx(data = ref_pca, query = query_pca, k = 10)$nn.index
-ref_labels  <- CD8_Obj$cell.type
-majority_vote <- apply(neighbors, 1, function(idx) {
-  votes <- ref_labels[idx]
-  tab <- sort(table(votes), decreasing = TRUE)
-  if (length(tab) == 0 || max(tab) < 5) return(NA)
-  names(tab)[1]
-})
-liu_seurat$majority_vote_pca <- majority_vote
+require_input(liu_cd8_file)
+liu_seurat <- readRDS(liu_cd8_file)
+if (file.exists(cd8_prepared_file)) {
+  CD8_Obj <- readRDS(cd8_prepared_file)
+} else {
+  CD8_Obj <- readRDS(cd8_reference_file) %>%
+    NormalizeData() %>%
+    FindVariableFeatures() %>%
+    ScaleData() %>%
+    RunPCA()
+  saveRDS(CD8_Obj, cd8_prepared_file)
+}
+ref_pca <- Embeddings(CD8_Obj, reduction = "pca")[, 1:20]
+query_pca <- Embeddings(liu_seurat, reduction = "ref.pca")[, 1:20]
+neighbors <- FNN::get.knnx(
+  data = ref_pca,
+  query = query_pca,
+  k = 10
+)$nn.index
+ref_labels <- CD8_Obj$cell.type
 
 # 6. Metadata and Label Mapping
 liu_meta <- liu_seurat@meta.data %>%
@@ -225,7 +234,7 @@ boxplot<- ggplot(plot_data, aes(x = Assigned_Cluster, y = Count, fill = Neighbor
     legend.position = "bottom"
   )
 
-#ggsave(filename = "kNN_neighbor_distribution_boxplot.pdf",plot = boxplot,device = cairo_pdf,   # ensures true vector output
+#ggsave(filename = file.path(results_dir, "kNN_neighbor_distribution_boxplot.pdf"), plot = boxplot, device = cairo_pdf,   # ensures true vector output
 #width = 12,height = 8, units = "in")
 
 library(tidyverse)
@@ -266,7 +275,7 @@ library(tidyr)
 library(ggplot2)
 library(Seurat)
 library(readxl)
-response_info <- read_excel("response_info.xlsx")
+response_info <- readxl::read_excel(response_file)
 # 1. Clean sample names in Seurat object
 liu_seurat$sample_clean <- liu_seurat$sample %>%
   str_replace("^P0*", "P") %>%
@@ -284,6 +293,7 @@ response_info_clean <- response_info %>%
 
 # 3. Join Response info by sample_clean
 liu_seurat@meta.data <- liu_seurat@meta.data %>%
+  select(-any_of(c("Response", "Response_Status"))) %>%
   left_join(response_info_clean %>% select(sample_clean, Response), by = "sample_clean")
 
 # 4. Convert response values to labels
@@ -296,6 +306,7 @@ liu_seurat$Response_Status <- case_when(
 # 5. Handle NA cluster labels for predicted clusters
 liu_seurat$majority_vote_pca <- as.character(liu_seurat$majority_vote_pca)
 liu_seurat$majority_vote_pca[is.na(liu_seurat$majority_vote_pca)] <- "NA"
+saveRDS(liu_seurat, liu_cd8_file)
 
 # 6. CD8 Reference Cluster Counts (with NA)
 cd8_cluster_counts <- liu_seurat@meta.data %>%
@@ -357,6 +368,11 @@ library(scales)
 # 1. Calculate Proportions
 cd8_cluster_prop <- cd8_cluster_counts %>%
   group_by(majority_vote_pca) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup()
+
+liu_cluster_prop <- liu_cluster_counts %>%
+  group_by(cluster) %>%
   mutate(proportion = n / sum(n)) %>%
   ungroup()
 
@@ -422,85 +438,61 @@ library(gridExtra)
 library(grid)
 library(readr)
 
-CD4_Obj <- readRDS("CD4.rds")
-liu_counts <- readRDS("GSE179994_all.Tcell.rawCounts.rds/GSE179994_all.Tcell.rawCounts.rds")
-liu_meta   <- read_tsv("GSE179994_Tcell.metadata.tsv/GSE179994_Tcell.metadata.tsv")
-liu_meta_cd4 <- liu_meta %>% filter(celltype == "CD4")
-counts_cd4   <- liu_counts[, liu_meta_cd4$cellid]
-
-AddMissingGenes <- function(seurat_obj, gene_list, assay = "RNA") {
-  current_genes <- rownames(seurat_obj)
-  missing_genes <- setdiff(gene_list, current_genes)
-  
-  if (length(missing_genes) > 0) {
-    zero_mat <- Matrix::Matrix(
-      0,
-      nrow = length(missing_genes),
-      ncol = ncol(seurat_obj),
-      dimnames = list(missing_genes, colnames(seurat_obj)),
-      sparse = TRUE
-    )
-    
-    counts <- GetAssayData(seurat_obj, assay = assay, layer = "counts")
-    counts <- rbind(counts, zero_mat)
-    seurat_obj <- SetAssayData(seurat_obj, assay = assay, layer = "counts", new.data = counts)
-    
-    data <- GetAssayData(seurat_obj, assay = assay, layer = "data")
-    data <- rbind(data, zero_mat)
-    seurat_obj <- SetAssayData(seurat_obj, assay = assay, layer = "data", new.data = data)
-  }
-  
-  return(seurat_obj)
+require_input(liu_cd4_file)
+liu_cd4_seurat <- readRDS(liu_cd4_file)
+if (file.exists(cd4_prepared_file)) {
+  CD4_Obj <- readRDS(cd4_prepared_file)
+} else {
+  CD4_Obj <- readRDS(cd4_reference_file) %>%
+    NormalizeData() %>%
+    FindVariableFeatures() %>%
+    ScaleData() %>%
+    RunPCA()
+  saveRDS(CD4_Obj, cd4_prepared_file)
 }
+ref_pca <- Embeddings(CD4_Obj, reduction = "pca")[, 1:20]
+query_pca <- Embeddings(liu_cd4_seurat, reduction = "ref.pca")[, 1:20]
+neighbors <- FNN::get.knnx(
+  data = ref_pca,
+  query = query_pca,
+  k = 10
+)$nn.index
+ref_labels <- CD4_Obj$cell.type
 
+liu_cd4_seurat$sample_clean <- liu_cd4_seurat$sample %>%
+  stringr::str_replace("^P0*", "P") %>%
+  stringr::str_replace_all("\\.pre\\.0*", ".pre.") %>%
+  stringr::str_replace_all("\\.post\\.0*", ".post.")
 
-# 2. Create and Normalize Liu CD4 Seurat Object
-liu_cd4_seurat <- CreateSeuratObject(counts_cd4, meta.data = as.data.frame(liu_meta_cd4)) %>%
-  NormalizeData() %>%
-  FindVariableFeatures() %>%  # optional; keeps Seurat happy but not used
-  ScaleData()
-# 3. Preprocess Reference CD4 Seurat Object
-CD4_Obj <- CD4_Obj %>%
-  NormalizeData() %>%
-  FindVariableFeatures() %>%
-  ScaleData() %>%
-  RunPCA() %>%
-  RunUMAP(reduction = "pca", dims = 1:20, return.model = TRUE)
+liu_cd4_seurat@meta.data <- liu_cd4_seurat@meta.data %>%
+  select(-any_of(c("Response", "Response_Status"))) %>%
+  left_join(
+    response_info_clean %>% select(sample_clean, Response),
+    by = "sample_clean"
+  )
 
-# 4. Add missing genes (with zeros) to Liu object to match reference
-all_genes <- rownames(CD4_Obj)
-liu_cd4_seurat <- AddMissingGenes(liu_cd4_seurat, all_genes)
-
-# 5. Find Anchors with All Genes
-anchors <- FindTransferAnchors(
-  reference = CD4_Obj,
-  query = liu_cd4_seurat,
-  dims = 1:20,
-  features = all_genes,
-  reference.reduction = "pca"
+liu_cd4_seurat$Response_Status <- case_when(
+  liu_cd4_seurat$Response == "Yes" ~ "Responder",
+  liu_cd4_seurat$Response == "No" ~ "Non-responder",
+  TRUE ~ NA_character_
 )
 
-liu_cd4_seurat <- MapQuery(
-  anchorset = anchors,
-  query = liu_cd4_seurat,
-  reference = CD4_Obj,
-  refdata = list(predicted.celltype = "cell.type"),
-  reference.reduction = "pca",
-  reduction.model = "umap"
+liu_cd4_seurat$majority_vote_pca <- as.character(
+  liu_cd4_seurat$majority_vote_pca
 )
+liu_cd4_seurat$majority_vote_pca[
+  is.na(liu_cd4_seurat$majority_vote_pca)
+] <- "NA"
 
-# 5. Majority Vote Labeling
-ref_pca     <- Embeddings(CD4_Obj, reduction = "pca")[, 1:20]
-query_pca   <- Embeddings(liu_cd4_seurat, reduction = "ref.pca")[, 1:20]
-neighbors   <- get.knnx(data = ref_pca, query = query_pca, k = 10)$nn.index
-ref_labels  <- CD4_Obj$cell.type
-majority_vote <- apply(neighbors, 1, function(idx) {
-  votes <- ref_labels[idx]
-  tab <- sort(table(votes), decreasing = TRUE)
-  if (length(tab) == 0 || max(tab) < 5) return(NA)
-  names(tab)[1]
-})
-liu_cd4_seurat$majority_vote_pca <- majority_vote
+cd4_cluster_counts <- liu_cd4_seurat@meta.data %>%
+  count(majority_vote_pca, Response_Status, name = "n") %>%
+  arrange(majority_vote_pca)
+
+liu_cd4_cluster_counts <- liu_cd4_seurat@meta.data %>%
+  count(cluster, Response_Status, name = "n") %>%
+  arrange(cluster)
+
+saveRDS(liu_cd4_seurat, liu_cd4_file)
 
 # 6. Metadata and Label Mapping
 liu_meta <- liu_cd4_seurat@meta.data %>%
@@ -548,11 +540,12 @@ final_plot <- plot_grid(p_alluvial, legend_table, rel_widths = c(2.5, 1), nrow =
 print(final_plot)
 
 ggsave(
-  filename = "Liu_CD4_Cluster_Prediction_Alluvial.svg",
+  filename = file.path(results_dir, "Liu_CD4_Cluster_Prediction_Alluvial.svg"),
   plot = final_plot,
   width = 12, # Adjust width as needed for better visualization of both the plot and the legend
   height = 8, # Adjust height as needed
-  units = "in"
+  units = "in",
+  device = "svg"
 )
 
 count_table <- table(
@@ -588,11 +581,12 @@ majority_count<-ggplot(plot_df, aes(x = reorder(Predicted_Cluster, -Cell_Count),
 
 
 ggsave(
-  filename = "CD4_majority_vote_count.svg",
+  filename = file.path(results_dir, "CD4_majority_vote_count.svg"),
   plot = majority_count,
   width = 10,
   height = 8,
-  units = "in"
+  units = "in",
+  device = "svg"
 )
 
 cat("\nThe CD4 UMAP overlay plot, 'Liu CD4 overlaid on Reference CD4 UMAP', has been successfully saved as Liu_CD4_UMAP_Overlay_Projection.svg\n")
@@ -673,7 +667,7 @@ p_confidence_cd4 <- ggplot(plot_data_cd4, aes(x = Assigned_Cluster, y = Neighbor
 
 # 2. Save as SVG (Best for editing in Illustrator/Inkscape)
 ggsave(
-  filename = "CD4_Boxplot.svg",
+  filename = file.path(results_dir, "CD4_Boxplot.svg"),
   plot = p_confidence_cd4,
   width = 10,
   height = 7,
@@ -683,7 +677,7 @@ ggsave(
 
 # 3. Save as PDF (Best for document embedding)
 ggsave(
-  filename = "CD4_Boxplot.pdf",
+  filename = file.path(results_dir, "CD4_Boxplot.pdf"),
   plot = p_confidence_cd4,
   width = 10,
   height = 7,
@@ -721,8 +715,18 @@ p_box_cd4_ranked <- ggplot(plot_data_cd4, aes(x = Assigned_Cluster, y = Neighbor
 
 
 # Save as Vector Files 
-ggsave("Fig_5A_CD8_Box_Plot_Ranked.pdf", p_box_cd8_ranked, width = 12, height = 8)
-ggsave("Fig_5B_CD4_Box_Plot_Ranked.pdf", p_box_cd4_ranked, width = 12, height = 8)
+ggsave(
+  file.path(results_dir, "Fig_5A_CD8_Box_Plot_Ranked.pdf"),
+  p_box_cd8_ranked,
+  width = 12,
+  height = 8
+)
+ggsave(
+  file.path(results_dir, "Fig_5B_CD4_Box_Plot_Ranked.pdf"),
+  p_box_cd4_ranked,
+  width = 12,
+  height = 8
+)
 
 #FIG D
 #FINAL PLOT
@@ -807,8 +811,11 @@ print(p1)
 order_2 <- c("Responder", "NA", "Non-responder")
 p2 <- create_stack_plot(base_data, order_2, "Non-resp / NA / Resp")
 print(p2)
-#ggsave("Fig5b_CD4_relative_proportion.svg", plot = p1, width = 10, height = 6)
-#ggsave("Fig5b_CD4_relative_proportion_NA_middle.svg", plot = p2, width = 10, height = 6)
+
+liu_cd4_cluster_prop <- liu_cd4_cluster_counts %>%
+  group_by(cluster) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup()
 
 ggplot(liu_cd4_cluster_prop,
        aes(x = cluster, y = proportion, fill = Response_Status)) +

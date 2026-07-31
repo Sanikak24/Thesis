@@ -14,8 +14,34 @@ library(ggsci)
 library(tidytext)
 library(ggpubr)
 library(cowplot)
+library(grid)
+
+nsclc_data_dir <- file.path("data", "nsclc")
+reference_dir <- file.path("data", "reference")
+results_dir <- file.path("results", "nsclc")
+intermediate_dir <- file.path(results_dir, "intermediate")
+
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(intermediate_dir, recursive = TRUE, showWarnings = FALSE)
+
+require_input <- function(path) {
+  if (
+    !file.exists(path) ||
+    is.na(file.info(path)$size) ||
+    file.info(path)$size == 0
+  ) {
+    stop(
+      "Required input file is missing or empty: ",
+      path,
+      "\nRun: Rscript NSCLC_Scripts/00_Setup_Data.R"
+    )
+  }
+}
+
 # 1. Load data
-CD8_Obj <- readRDS("CD8.rds")
+cd8_reference_file <- file.path(reference_dir, "CD8_Obj_for_mapping.rds")
+require_input(cd8_reference_file)
+CD8_Obj <- readRDS(cd8_reference_file)
 
 #CD8 ATLAS
 colorsForDataType <- c("#b5170f", "#f9844a", "#f9c74f", "#90be6d", "#43aa8b",
@@ -55,8 +81,15 @@ umap_plot <- ggplot(umap_df, aes(x = UMAP_1, y = UMAP_2, color = cell_type)) +
   guides(color = guide_legend(override.aes = list(size = 4)))
 
 
-ggsave(file.path(figurePath, "UMAP_Figure_Optimized.pdf"), plot = umap_plot, 
-       +        width = 160, height = 160, units = "mm", dpi = 3000, device = cairo_pdf)
+ggsave(
+  file.path(results_dir, "UMAP_Figure_Optimized.pdf"),
+  plot = umap_plot,
+  width = 160,
+  height = 160,
+  units = "mm",
+  dpi = 3000,
+  device = grDevices::pdf
+)
 
 #GENE EXPRESSION
 GeneSet1 <- c("TCF7", "IL7R", "GPR183", "MGAT4A")
@@ -104,7 +137,7 @@ for (i in 1:3) {
 combined_umap <- wrap_plots(plot_list, ncol = 3) + plot_layout(guides = 'collect')
 print(combined_umap)
 
-ggsave("UMAP_gene_exp_Fig1.pdf", 
+ggsave(file.path(results_dir, "UMAP_gene_exp_Fig1.pdf"),
        plot = combined_umap, width = 12, height = 4.5)
 
 # 3. Bar Plot: Average Module Score
@@ -150,5 +183,5 @@ p_bar <- ggplot(plot_data, aes(x = cell.type, y = Mean_Score, fill = Module)) +
 
 print(p_bar)
 
-ggsave("BarPlot_ModuleScore.pdf", 
+ggsave(file.path(results_dir, "BarPlot_ModuleScore.pdf"),
        plot = p_bar, width = 10, height = 6)

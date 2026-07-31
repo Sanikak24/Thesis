@@ -1,22 +1,61 @@
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(patchwork)
+
+nsclc_data_dir <- file.path("data", "nsclc")
+reference_dir <- file.path("data", "reference")
+results_dir <- file.path("results", "nsclc")
+intermediate_dir <- file.path(results_dir, "intermediate")
+
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(intermediate_dir, recursive = TRUE, showWarnings = FALSE)
+
+require_input <- function(path) {
+  if (
+    !file.exists(path) ||
+    is.na(file.info(path)$size) ||
+    file.info(path)$size == 0
+  ) {
+    stop(
+      "Required input file is missing or empty: ",
+      path,
+      "\nRun: Rscript NSCLC_Scripts/00_Setup_Data.R"
+    )
+  }
+}
+
+cd8_reference_file <- file.path(reference_dir, "CD8_Obj_for_mapping.rds")
+liu_cd8_file <- file.path(intermediate_dir, "liu_cd8_mapped.rds")
+require_input(cd8_reference_file)
+if (!file.exists(liu_cd8_file)) {
+  stop(
+    "Mapped CD8 object is missing: ",
+    liu_cd8_file,
+    "\nRun NSCLC_Scripts/Fig2.R first."
+  )
+}
+require_input(liu_cd8_file)
+
 s.genes  <- cc.genes.updated.2019$s.genes
 g2m.genes <- cc.genes.updated.2019$g2m.genes
 
 # --- Load data objects ---
-CD8_Obj <- readRDS("CD8.rds")
-liu_counts <- readRDS("GSE179994_all.Tcell.rawCounts.rds/GSE179994_all.Tcell.rawCounts.rds")
-liu_meta <- readr::read_tsv("GSE179994_Tcell.metadata.tsv/GSE179994_Tcell.metadata.tsv")
+CD8_Obj <- readRDS(cd8_reference_file)
+liu_mapped <- readRDS(liu_cd8_file)
 
 # --- A. Query (Liu) Processing ---
-liu_meta_cd8 <- liu_meta %>% filter(celltype == "CD8")
-counts_cd8   <- liu_counts[, liu_meta_cd8$cellid]
-liu_cd8 <- CreateSeuratObject(counts = counts_cd8, meta.data = as.data.frame(liu_meta_cd8))
-
-liu_cd8 <- NormalizeData(liu_cd8)
-liu_cd8 <- FindVariableFeatures(liu_cd8)
-liu_cd8 <- ScaleData(liu_cd8)
-liu_cd8 <- RunPCA(liu_cd8, features = VariableFeatures(liu_cd8))
-# Add Cell Cycle Scoring to the Query object (needed for the bar plot)
-liu_cd8 <- CellCycleScoring(liu_cd8, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
+liu_cd8 <- liu_mapped
+if (!"Phase" %in% colnames(liu_cd8@meta.data)) {
+  liu_cd8 <- CellCycleScoring(
+    liu_cd8,
+    s.features = s.genes,
+    g2m.features = g2m.genes,
+    set.ident = FALSE
+  )
+}
 
 # Reference (CD8_Obj) Processing (Includes UMAP model fix) ---
 CD8_Obj <- NormalizeData(CD8_Obj)
@@ -33,29 +72,14 @@ CD8_Obj <- RunUMAP(
 # Add Cell Cycle Scoring to the Reference object
 CD8_Obj <- CellCycleScoring(CD8_Obj, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
 
-# 2. INTEGRATION (MAPPING)
-
-# Find anchors (reference.reduction must be set)
-anchors <- FindTransferAnchors(
-  reference = CD8_Obj,
-  query = liu_cd8,
-  dims = 1:20,
-  reference.reduction = "pca"
-)
-
-# Map Liu into atlas UMAP space
-liu_mapped <- MapQuery(
-  anchorset = anchors,
-  query = liu_cd8,
-  reference = CD8_Obj,
-  # Use 'cell.type' from the reference, predicted column will be 'predicted.Ref_cluster'
-  refdata = list(Ref_cluster = CD8_Obj$cell.type), 
-  reduction.model = "umap"
-)
-
 # CRITICAL FIX: Add the predicted labels to the original query object's metadata
-# The actual name of the predicted column in liu_mapped will be 'predicted.Ref_cluster'
-liu_cd8$predicted.cluster <- liu_mapped$predicted.Ref_cluster
+if ("predicted.Ref_cluster" %in% colnames(liu_mapped@meta.data)) {
+  liu_cd8$predicted.cluster <- liu_mapped$predicted.Ref_cluster
+} else if ("predicted.predicted.celltype" %in% colnames(liu_mapped@meta.data)) {
+  liu_cd8$predicted.cluster <- liu_mapped$predicted.predicted.celltype
+} else {
+  stop("Mapped CD8 object has no predicted cluster metadata column.")
+}
 
 # Extract UMAP embeddings
 ref_umap <- Embeddings(CD8_Obj, "umap")
@@ -112,6 +136,19 @@ pca_reduc <- CreateDimReducObject(
 )
 combined[["pca"]] <- pca_reduc
 
+df_cycle_by_dataset <- combined@meta.data %>%
+  count(dataset, Phase, name = "n") %>%
+  group_by(dataset) %>%
+  mutate(freq = n / sum(n)) %>%
+  ungroup()
+
+liu_cycle <- liu_cd8@meta.data %>%
+  count(cluster, Phase, name = "n") %>%
+  group_by(cluster) %>%
+  mutate(freq = n / sum(n)) %>%
+  ungroup() %>%
+  rename(liu_cluster = cluster)
+
 #FIG A
 p_cycle_dataset <- ggplot(df_cycle_by_dataset, aes(x = dataset, y = freq, fill = Phase)) +
   geom_bar(stat = "identity", position = "fill") +
@@ -121,6 +158,12 @@ p_cycle_dataset <- ggplot(df_cycle_by_dataset, aes(x = dataset, y = freq, fill =
   scale_fill_manual(values = c("G1" = "#1f77b4", "S" = "#ff7f0e", "G2M" = "#2ca02c")) +
   theme(plot.title = element_text(hjust = 0.5))
 p_cycle_dataset
+ggsave(
+  file.path(results_dir, "SFig2_cell_cycle_by_dataset.pdf"),
+  plot = p_cycle_dataset,
+  width = 7,
+  height = 5
+)
 
 #FIG B
 p_cycle_liu <- ggplot(
@@ -140,5 +183,11 @@ p_cycle_liu <- ggplot(
   )
 
 p_cycle_liu
+ggsave(
+  file.path(results_dir, "SFig2_cell_cycle_by_Liu_cluster.pdf"),
+  plot = p_cycle_liu,
+  width = 9,
+  height = 6
+)
 
 #FIG C

@@ -6,10 +6,47 @@ library(cowplot)
 library(gridExtra)
 library(grid)
 library(readr)
+library(Matrix)
+library(stringr)
+library(readxl)
+library(pROC)
 
-CD4_Obj <- readRDS("CD4.rds")
-liu_counts <- readRDS("GSE179994_all.Tcell.rawCounts.rds/GSE179994_all.Tcell.rawCounts.rds")
-liu_meta   <- read_tsv("GSE179994_Tcell.metadata.tsv/GSE179994_Tcell.metadata.tsv")
+nsclc_data_dir <- file.path("data", "nsclc")
+reference_dir <- file.path("data", "reference")
+results_dir <- file.path("results", "nsclc")
+intermediate_dir <- file.path(results_dir, "intermediate")
+
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(intermediate_dir, recursive = TRUE, showWarnings = FALSE)
+
+require_input <- function(path) {
+  if (
+    !file.exists(path) ||
+    is.na(file.info(path)$size) ||
+    file.info(path)$size == 0
+  ) {
+    stop(
+      "Required input file is missing or empty: ",
+      path,
+      "\nRun: Rscript NSCLC_Scripts/00_Setup_Data.R"
+    )
+  }
+}
+
+cd4_reference_file <- file.path(reference_dir, "CD4_Obj_for_mapping.rds")
+counts_file <- file.path(nsclc_data_dir, "GSE179994_all.Tcell.rawCounts.rds")
+metadata_file <- file.path(nsclc_data_dir, "GSE179994_Tcell.metadata.tsv")
+response_file <- file.path(nsclc_data_dir, "response_info.xlsx")
+liu_cd4_file <- file.path(intermediate_dir, "liu_cd4_mapped.rds")
+
+invisible(lapply(
+  c(cd4_reference_file, counts_file, metadata_file, response_file),
+  require_input
+))
+
+CD4_Obj <- readRDS(cd4_reference_file)
+liu_counts <- readRDS(counts_file)
+liu_meta <- readr::read_tsv(metadata_file, show_col_types = FALSE)
 liu_meta_cd4 <- liu_meta %>% filter(celltype == "CD4")
 counts_cd4   <- liu_counts[, liu_meta_cd4$cellid]
 
@@ -116,7 +153,7 @@ library(tidyr)
 library(ggplot2)
 library(Seurat)
 library(readxl)
-response_info <- read_excel("response_info.xlsx")
+response_info <- readxl::read_excel(response_file)
 # 1. Clean sample names in Seurat object
 liu_cd4_seurat$sample_clean <- liu_cd4_seurat$sample %>%
   str_replace("^P0*", "P") %>%
@@ -146,6 +183,7 @@ liu_cd4_seurat$Response_Status <- case_when(
 # 5. Handle NA cluster labels for predicted clusters
 liu_cd4_seurat$majority_vote_pca <- as.character(liu_cd4_seurat$majority_vote_pca)
 liu_cd4_seurat$majority_vote_pca[is.na(liu_cd4_seurat$majority_vote_pca)] <- "NA"
+saveRDS(liu_cd4_seurat, liu_cd4_file)
 
 # 6. CD4 Reference Cluster Counts (with NA)
 cd4_cluster_counts <- liu_cd4_seurat@meta.data %>%
@@ -351,11 +389,12 @@ print(combined_roc_plot_cd4)
 # 5. Save the plot as an SVG file
 #-------------------------------------------------
 ggsave(
-  filename = "CD4_ROC_Combined_Models_Sample_Level.svg",
+  filename = file.path(results_dir, "CD4_ROC_Combined_Models_Sample_Level.svg"),
   plot = combined_roc_plot_cd4,
   width = 12,
   height = 9,
-  units = "in"
+  units = "in",
+  device = "svg"
 )
 
 cat("\nAll four CD4 sample-level logistic regression models have been fit, and the combined ROC curves plot has been saved as CD4_ROC_Combined_Models_Sample_Level.svg. 📈\n")
