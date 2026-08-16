@@ -27,6 +27,27 @@ Clinical annotations are obtained from the supplementary tables of:
 
 Raw data and generated results are intentionally excluded from Git.
 
+## Reproducible R environment
+
+The workflow was validated with R 4.6.0, Seurat 5.5.1, and `renv` 1.2.3.
+These are the tested versions, not strict minimum requirements. Restore the
+recorded package environment from the repository root before running analyses:
+
+```r
+install.packages("renv")
+renv::restore()
+```
+
+Run the lightweight validation before downloading data:
+
+```bash
+Rscript scripts/validate.R
+```
+
+This checks the repository structure, parses every R script, and reports any
+missing packages. It does not download data or execute the memory-intensive
+Seurat analyses.
+
 ## Repository layout
 
 ```text
@@ -108,11 +129,13 @@ See `BCC_Scripts/README.md` for BCC-specific details.
 
 ## Validation
 
-Parse-check all NSCLC scripts with:
+Validate both workflows with:
 
 ```bash
-for f in NSCLC_Scripts/*.R; do
-  echo "Checking $f"
-  Rscript -e "parse(file='$f')" || exit 1
-done
+Rscript scripts/validate.R
 ```
+
+The same validation runs automatically on GitHub Actions. Successful validation
+establishes structural and syntactic reproducibility; complete end-to-end
+execution still requires the documented multi-gigabyte public datasets and
+sufficient memory for Seurat mapping.
